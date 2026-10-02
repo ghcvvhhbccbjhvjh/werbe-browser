@@ -1,0 +1,257 @@
+name: APK bauen
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Projekt anlegen
+        run: |
+          mkdir -p app/src/main/assets app/src/main/java/de/beispiel/werbebrowser
+          cat > settings.gradle.kts <<'WB_EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "Werbebrowser"
+          include(":app")
+          WB_EOF
+          cat > build.gradle.kts <<'WB_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          WB_EOF
+          cat > gradle.properties <<'WB_EOF'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          WB_EOF
+          cat > app/build.gradle.kts <<'WB_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "de.beispiel.werbebrowser"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "de.beispiel.werbebrowser"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          WB_EOF
+          cat > app/src/main/AndroidManifest.xml <<'WB_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <application
+                  android:label="Werbe-Browser"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar"
+                  android:allowBackup="false">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          WB_EOF
+          cat > app/src/main/assets/ad.html <<'WB_EOF'
+          <!doctype html>
+          <html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+          <style>
+          html,body{height:100%;margin:0}
+          body{display:grid;place-items:center;background:#fff4d6;font-family:sans-serif;color:#2b2113;text-align:center}
+          .ad{padding:24px}h2{margin:0 0 8px;font-size:24px}p{margin:0;font-size:16px;line-height:1.5}
+          </style></head><body>
+          <!-- HIER KOMMT DEINE ECHTE WERBUNG HIN: Anzeigen-Code deines Werbeanbieters für deine eigene Werbefläche. -->
+          <div class="ad"><h2>Hier steht deine Werbung</h2><p>Platzhalter-Anzeige. Sie erscheint, bevor eine neue Webseite geöffnet wird.</p></div>
+          </body></html>
+          WB_EOF
+          cat > app/src/main/java/de/beispiel/werbebrowser/MainActivity.kt <<'WB_EOF'
+          package de.beispiel.werbebrowser
+
+          import android.annotation.SuppressLint
+          import android.app.Activity
+          import android.graphics.Color
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.CountDownTimer
+          import android.view.Gravity
+          import android.view.KeyEvent
+          import android.view.View
+          import android.view.ViewGroup
+          import android.view.inputmethod.EditorInfo
+          import android.webkit.WebResourceRequest
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+
+              // Einstellungen: Wartezeit der Werbung in Sekunden
+              private val adSeconds = 5
+
+              private lateinit var web: WebView
+              private lateinit var adWeb: WebView
+              private lateinit var addr: EditText
+              private lateinit var overlay: LinearLayout
+              private lateinit var adInfo: TextView
+              private lateinit var cont: Button
+              private var curHost = ""
+              private var pending: String? = null
+              private var timer: CountDownTimer? = null
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              @SuppressLint("SetJavaScriptEnabled")
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; fitsSystemWindows = true }
+
+                  // Leiste oben: Zurück, Adresse, Los
+                  val bar = LinearLayout(this).apply { setPadding(dp(6), dp(6), dp(6), dp(6)); gravity = Gravity.CENTER_VERTICAL }
+                  val back = Button(this).apply { text = "‹"; setOnClickListener { if (web.canGoBack()) web.goBack() } }
+                  addr = EditText(this).apply {
+                      hint = "Adresse oder Suchbegriff"
+                      setSingleLine(true)
+                      imeOptions = EditorInfo.IME_ACTION_GO
+                      setOnEditorActionListener { _, action, ev ->
+                          if (action == EditorInfo.IME_ACTION_GO || ev?.keyCode == KeyEvent.KEYCODE_ENTER) { go(norm(text.toString())); true } else false
+                      }
+                  }
+                  val goBtn = Button(this).apply { text = "→"; setOnClickListener { go(norm(addr.text.toString())) } }
+                  bar.addView(back, LinearLayout.LayoutParams(dp(52), ViewGroup.LayoutParams.WRAP_CONTENT))
+                  bar.addView(addr, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                  bar.addView(goBtn, LinearLayout.LayoutParams(dp(52), ViewGroup.LayoutParams.WRAP_CONTENT))
+                  root.addView(bar)
+
+                  val content = FrameLayout(this)
+
+                  web = WebView(this).apply {
+                      settings.javaScriptEnabled = true
+                      settings.domStorageEnabled = true
+                      webViewClient = object : WebViewClient() {
+                          override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                              val url = request.url.toString()
+                              if (request.isForMainFrame && request.url.scheme?.startsWith("http") == true && host(url) != curHost) {
+                                  go(url); return true
+                              }
+                              return false
+                          }
+                          override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                              addr.setText(url)
+                          }
+                          override fun onPageFinished(view: WebView, url: String) {
+                              curHost = host(url)
+                          }
+                      }
+                  }
+                  content.addView(web, FrameLayout.LayoutParams(-1, -1))
+
+                  // Werbe-Ebene
+                  overlay = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(Color.parseColor("#E6101828"))
+                      setPadding(dp(16), dp(16), dp(16), dp(16))
+                      visibility = View.GONE
+                      isClickable = true
+                  }
+                  adInfo = TextView(this).apply { setTextColor(Color.WHITE); textSize = 14f; setPadding(0, 0, 0, dp(8)) }
+                  adWeb = WebView(this).apply { settings.javaScriptEnabled = true }
+                  val buttons = LinearLayout(this).apply { gravity = Gravity.END; setPadding(0, dp(8), 0, 0) }
+                  val cancel = Button(this).apply { text = "Abbrechen"; setOnClickListener { closeAd(); pending = null } }
+                  cont = Button(this).apply { setOnClickListener { val u = pending; closeAd(); if (u != null) load(u) } }
+                  buttons.addView(cancel); buttons.addView(cont)
+                  overlay.addView(adInfo)
+                  overlay.addView(adWeb, LinearLayout.LayoutParams(-1, 0, 1f))
+                  overlay.addView(buttons)
+                  content.addView(overlay, FrameLayout.LayoutParams(-1, -1))
+
+                  root.addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
+                  setContentView(root)
+              }
+
+              private fun norm(v: String): String {
+                  val t = v.trim()
+                  if (t.isEmpty()) return ""
+                  if (t.startsWith("http://") || t.startsWith("https://")) return t
+                  if (!t.contains(" ") && Regex("^[^\\s]+\\.[^\\s]{2,}$").matches(t)) return "https://$t"
+                  return "https://duckduckgo.com/?q=" + Uri.encode(t)
+              }
+
+              private fun host(u: String): String = (Uri.parse(u).host ?: "").removePrefix("www.")
+
+              private fun go(url: String) {
+                  if (url.isEmpty()) return
+                  if (host(url) != curHost) showAd(url) else load(url)
+              }
+
+              private fun load(url: String) {
+                  curHost = host(url)
+                  addr.setText(url)
+                  web.loadUrl(url)
+              }
+
+              private fun showAd(url: String) {
+                  pending = url
+                  adInfo.text = "Werbung  ·  danach: " + host(url)
+                  adWeb.loadUrl("file:///android_asset/ad.html")
+                  overlay.visibility = View.VISIBLE
+                  cont.isEnabled = false
+                  timer?.cancel()
+                  timer = object : CountDownTimer(adSeconds * 1000L, 1000L) {
+                      override fun onTick(ms: Long) { cont.text = "Weiter in " + ((ms + 999) / 1000) }
+                      override fun onFinish() { cont.text = "Weiter zur Seite"; cont.isEnabled = true }
+                  }.start()
+                  cont.text = "Weiter in $adSeconds"
+              }
+
+              private fun closeAd() {
+                  timer?.cancel()
+                  overlay.visibility = View.GONE
+                  adWeb.loadUrl("about:blank")
+              }
+
+              @Deprecated("Deprecated in Java")
+              override fun onBackPressed() {
+                  when {
+                      overlay.visibility == View.VISIBLE -> { closeAd(); pending = null }
+                      web.canGoBack() -> web.goBack()
+                      else -> super.onBackPressed()
+                  }
+              }
+          }
+          WB_EOF
+      - name: APK bauen
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: werbe-browser-apk
+          path: app/build/outputs/apk/debug/*.apk
